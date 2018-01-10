@@ -140,6 +140,7 @@ if [ `basename $blkdev` != "block" ]; then
 				[ "$have_uuid" = "0" ] && {
 					mkdir -p /mnt/$device
 					set_fstab
+					block mount >> /dev/null 2>&1
 				}
 			}
 		}
