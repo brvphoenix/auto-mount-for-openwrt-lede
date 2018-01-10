@@ -52,21 +52,24 @@ set_fstab(){
 
 			case "$my_fstype" in
 			ext*)
-				uci set fstab.${section}.options="noatime";;
+				uci set fstab.@mount[$n].options="noatime"
+			;;
 			'ntfs')
 				if [ $(lsmod | grep -c ufsd) -ge 1 ]
 				then
-					uci set fstab.${section}.fstype="ufsd"
-					uci set fstab.${section}.options="noatime,nls=utf8,force"
+					uci set fstab.@mount[$n].fstype="ufsd"
+					uci set fstab.@mount[$n].options="noatime,nls=utf8,force"
 				else
-					uci set fstab.${section}.fstype="ntfs-3g"
-					uci set fstab.${section}.options="noatime,iocharset=utf8,big_writes"
+					uci set fstab.@mount[$n].fstype="ntfs-3g"
+					uci set fstab.@mount[$n].options="noatime,iocharset=utf8,big_writes"
 				fi
 			;;
 			'exfat')
-				uci set fstab.${section}.options="noatime";;
+				uci set fstab.@mount[$n].options="noatime"
+			;;
 			'vfat')
-				uci set fstab.${section}.options="iocharset=utf8,umask=0000,dmask=0000,fmask=0000";;
+				uci set fstab.@mount[$n].options="iocharset=utf8,umask=0000,dmask=0000,fmask=0000"
+			;;
 			*)
 				uci revert fstab
 			;;
@@ -77,6 +80,18 @@ set_fstab(){
 	}
 }
 
+del_fstab(){
+
+	del_disk=$(uci show fstab | grep "/mnt/$device" | awk -F '[' '{print $2}' | awk -F ']' '{print $1}' | sort -r )
+	[ -n "$del_disk" ] && {
+		for i in $del_disk
+		do
+			uci delete fstab.@mount[$i]
+		done
+		uci commit fstab
+	}
+
+}
 
 [ -e /etc/config/fstab ] || {
 	block detect > /etc/config/fstab
@@ -129,6 +144,14 @@ if [ `basename $blkdev` != "block" ]; then
 			}
 		}
 	;;
+
+	remove) 
+    		del_fstab
+		umount /mnt/$device  
+    		if [ $? -eq 0 ]  
+    		then  
+      			rmdir /mnt/$device
+    		fi 
 	esac  
 fi
 
