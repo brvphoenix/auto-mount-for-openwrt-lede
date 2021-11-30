@@ -1,145 +1,130 @@
 #!/bin/sh
 
-. /lib/functions.sh
+_debug() {
+	logger -t Auto-Mount "$@"
+}
 
-set_fstab() {
-	local device=$1
-	local my_fstype="$(block info | grep /dev/$device | sed -n 's/.*TYPE=\"\(\w\+\)\".*/\1/gp')"
+_add_to_fstab() {
+	local _device=$1
+	local _uuid=$2
+	local _target=$3
+	local _fstype=$4
 
-	[ -n "$my_fstype" ] && {
-		logger -t Auto-Mount "New block.File system:${my_fstype}"
-		if [ "$my_fstype" = 'swap' ]; then
-			n=$(uci show fstab | grep "fstab.@swap" | grep -c "=swap")
-
-			[ $n -gt 0 ] && {
-				for i in $(seq 0 $n)
-				do
-					old_swap="$(uci get fstab.@swap[$i].device)"
-					[ "$old_swap" == "/dev/$device" ] && {
-						FLAG="SKIP"
-						break
-					}
-				done
-			}
-
-			[ "$FLAG" != "SKIP" ] && {
-				uci add fstab swap
-				uci set fstab.@swap[$n]="swap"
-				uci set fstab.@swap[$n].enabled='1'
-				uci set fstab.@swap[$n].device="/dev/$device"
-			}
+	if [ -n "$_fstype" ]; then
+		_debug "New block's filesystem: ${_fstype}"
+		if [ "$_fstype" = 'swap' ]; then
+			uci add fstab swap
+			uci set fstab.@swap[-1]="swap"
+			uci set fstab.@swap[-1].enabled='1'
+			uci set fstab.@swap[-1].device="$_device"
 		else
-			n=$(uci show fstab | grep "fstab.@mount" | grep -c "=mount")
+			uci add fstab mount
+			uci set fstab.@mount[-1]="mount"
+			uci set fstab.@mount[-1].enabled='1'
+			uci set fstab.@mount[-1].uuid="${_uuid}"
+			uci set fstab.@mount[-1].target="$_target"
+			uci set fstab.@mount[-1].fstype="$_fstype"
+			uci set fstab.@mount[-1].automount='1'
 
-			[ $n -gt 0 ] && {
-				for i in $(seq 0 $n)
-				do
-					old_mount="$(uci get fstab.@mount[$i].uuid)"
-					[ "$old_mount" == "${get_uuid}" ] && {
-						FLAG="SKIP"
-						break
-					}
-				done
-			}
-
-			[ "$FLAG" != "SKIP" ] && {
-				uci add fstab mount
-				uci set fstab.@mount[$n]="mount"
-				uci set fstab.@mount[$n].enabled='1'
-				uci set fstab.@mount[$n].uuid="${get_uuid}"
-				uci set fstab.@mount[$n].target="/mnt/$device"
-				uci set fstab.@mount[$n].fstype="$my_fstype"
-
-				case "$my_fstype" in
-				ext*)
-					uci set fstab.@mount[$n].options="noatime"
+			case "$_fstype" in
+				ext*|squashfs)
+					uci set fstab.@mount[-1].options="noatime"
 				;;
-				'ntfs')
-					if [ $(lsmod | grep -c ufsd) -ge 1 ]
-					then
-						uci set fstab.@mount[$n].fstype="ufsd"
-						uci set fstab.@mount[$n].options="noatime,nls=utf8,force"
+				ntfs)
+					if [ "$(lsmod | grep -c ufsd)" -ge 1 ]; then
+						uci set fstab.@mount[-1].fstype="ufsd"
+						uci set fstab.@mount[-1].options="noatime,nls=utf8,force"
 					else
-						uci set fstab.@mount[$n].fstype="ntfs-3g"
-						uci set fstab.@mount[$n].options="noatime,iocharset=utf8,big_writes"
+						uci set fstab.@mount[-1].fstype="ntfs-3g"
+						uci set fstab.@mount[-1].options="noatime,iocharset=utf8,big_writes"
 					fi
 				;;
-				'exfat')
-					uci set fstab.@mount[$n].options="noatime"
+				exfat)
+					uci set fstab.@mount[-1].options="noatime"
 				;;
-				'vfat')
-					uci set fstab.@mount[$n].options="iocharset=utf8,umask=0000,dmask=0000,fmask=0000"
+				vfat)
+					uci set fstab.@mount[-1].options="iocharset=utf8,umask=0000,dmask=0000,fmask=0000"
 				;;
 				*)
 					uci revert fstab
 				;;
-				esac
-			}
+			esac
 		fi
 		uci commit fstab
+	fi
+}
+
+_delete_from_fstab() {
+	[ -z "$@" ] || uci show fstab | grep "$@" | awk -F. '{print $1 "." $2}' | {
+		read line
+		if [ "$(uci -q get ${line}.automount)" = "1" ] && [ "$(uci -q get ${line}.enabled)" = "1" ]; then
+			uci delete $line
+			uci commit fstab
+		fi
 	}
 }
 
-del_fstab() {
-	del_disk=$(uci show fstab | grep "/mnt/$1" | awk -F '[' '{print $2}' | awk -F ']' '{print $1}' | sort -r )
-	[ -n "$del_disk" ] && {
-		for i in $del_disk
-		do
-			uci delete fstab.@mount[$i]
-		done
-		uci commit fstab
-	}
+_make_target() {
+	local _device=$1
+	local _partation=$(basename $_device)
+	local _disk="$(echo $_partation | tr -d 0-9)"
+	local _mounts="$(mount -l | sed -ne 's/^\S\+ on \/mnt\/\('${_disk}'[0-9]\+\).*/\1/gp')"
+
+	[[ "$_mounts" =~ "$_partation" ]] || { echo "/mnt/$_partation"; return; }
+
+	local _max_num=0
+	local _m _m_num
+	for _m in $_mounts; do
+		_m_num="$(echo $_m | tr -d a-z)"
+		if [ "$_m_num" -gt "$_max_num"  ]; then
+			_max_num="$_m_num"
+		fi
+	done
+
+	#_debug "_mounts $_mounts dev number ${_max_num}"
+	echo "/mnt/${_disk}$((_max_num + 1))"
 }
 
-handle_mount() {
-	local enabled
-	config_get_bool enabled "$1" enabled
-	[ "$enabled" = "0" ] && uci delete fstab.$1
-}
+if [ ! -e /etc/config/fstab ]; then
+	. /lib/functions.sh
+	config_cb() { [ "$1" != "mount" ] || uci delete fstab.$2; }
+	block detect > /etc/config/fstab
+	config_load fstab
+	uci commit fstab
+fi
 
-[ -e /etc/config/fstab ] || block detect > /etc/config/fstab
-config_load fstab
-config_foreach handle_mount mount ""
-uci commit fstab
-
-blkdev="$(dirname $DEVPATH)"
-
-if [ "$(basename $blkdev)" != "block" ]; then
-	device="$(basename $DEVPATH)"
-	mountpoint="$sed -ne 's|^[^ ]*/$device ||; T; s/ .*//p' /proc/self/mounts)"
+if [ "$DEVTYPE" = "partition" ]; then
+	dev_name="${DEVICENAME:-${DEVNAME:-$(basename "$DEVPATH")}}"
+	dev_target="$(sed -ne "s|^[^ ]*/$dev_name ||; T; s/ .*//p" /proc/self/mounts)"
 
 	case "$ACTION" in
 	add)
-		get_uuid="$(block info | grep /dev/${device} | sed 's/.*UUID=\"\([0-9a-f-]*\).*\"/\1/g')"
-		[ -n "$get_uuid" ] && {
-
-			mounted="$(mount -l | awk '{print $1}')"
-			flag=0
-			for dev_mounted in $mounted ; do
-				if [ "/dev/${device}" == $dev_mounted ]; then
-					flag=1
+		root_device=$(findmnt -D -u -U -o SOURCE,TARGET | awk '$2 == "/rom" { print $1 }')
+		if [ "${root_device##*/}" != "$dev_name" ]; then
+			block info | sed -n 's|\(^/dev/'${dev_name}'\).*UUID="\(\S\+\)".*TYPE="\(\w\+\)"$|\1 \2 \3|gp' | {
+				read _device _uuid _fstype
+				if [ -n "$_uuid" ] && [ -z "$dev_target" ]; then
+					_debug "Block device with UUID=$_uuid has been found"
+					if [ "$(uci show fstab | grep -c "$_uuid")" -eq 0 ]; then
+						_debug "Block device ${_device} has been added."
+						_target="$(_make_target $_device)"
+						_debug "${_device} mount on $_target."
+						mkdir -p "$_target"
+						_add_to_fstab "$_device" "$_uuid" "$_target" "$_fstype"
+					fi
 				fi
-			done
-
-			[ $flag != 1 ] && {
-				logger -t Auto-Mount "Block /dev/${device} added."
-				logger -t Auto-Mount "UUID=$get_uuid"
-				have_uuid=$(uci show fstab | grep -c "$get_uuid")
-
-				[ "$have_uuid" = "0" ] && {
-					mkdir -p /mnt/$device
-					set_fstab $device
-					block mount >> /dev/null 2>&1
-				}
 			}
-		}
+		fi
+		/sbin/block hotplug
 	;;
 
 	remove)
-		del_fstab $device
-		umount /mnt/$device
-		if [ $? -eq 0 ]; then
-			rmdir /mnt/$device
+		if [ -n "$dev_target" ]; then
+			_delete_from_fstab "$dev_target"
+			if /sbin/block hotplug; then
+				rmdir "$dev_target"
+				_debug "umount /dev/$dev_name on $dev_target"
+			fi
 		fi
 	esac
 fi
